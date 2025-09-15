@@ -18,7 +18,7 @@ from pygam import LinearGAM, LogisticGAM, s, f
 # Set plot style
 sns.set_style("whitegrid")
 
-class ModelAssumptionEDA:
+class ModelAssumptionChecker:
     """
     A class to perform Exploratory Data Analysis (EDA) to check assumptions
     for Linear Models (Linear/Logistic Regression) and GAMs.
