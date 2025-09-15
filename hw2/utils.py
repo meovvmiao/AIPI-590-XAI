@@ -29,7 +29,7 @@ class ModelAssumptionChecker:
         model_type (str): Type of model, either 'linear' for regression or
                           'logistic' for classification.
     """
-    def __init__(self, data, target_variable, model_type):
+    def __init__(self, data, target_variable, feature_columns, model_type):
         if model_type not in ['linear', 'logistic']:
             raise ValueError("model_type must be 'linear' or 'logistic'")
         if target_variable not in data.columns:
@@ -38,7 +38,7 @@ class ModelAssumptionChecker:
         self.data = data.copy()
         self.target = target_variable
         self.model_type = model_type
-        self.features = [col for col in self.data.columns if col != self.target]
+        self.features = feature_columns
 
         # Identify feature types
         self.numeric_features = self.data[self.features].select_dtypes(include=np.number).columns.tolist()
