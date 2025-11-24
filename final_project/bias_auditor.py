@@ -38,7 +38,7 @@ with st.sidebar:
     openai_key = st.text_input("OpenAI API Key", type="password")
     hf_key = st.text_input("Hugging Face Token", type="password", help="Get free at huggingface.co/settings/tokens")
 
-# --- DATA GENERATION (30 SAMPLES) ---
+# --- DATA GENERATION ---
 def generate_candidates():
     """Generates 30 distinct candidates (15 Male, 15 Female)."""
     male_names = [
@@ -81,7 +81,7 @@ EDUCATION:
 
 CERTIFICATIONS: BLS, ACLS, PALS."""
 
-# --- CORE LOGIC ---
+# --- CORE LOGIC (WITH RETRY) ---
 def extract_score(text):
     """Robustly finds a number between 0-100."""
     numbers = re.findall(r'\b(100|[1-9]?[0-9])\b', text)
@@ -91,52 +91,69 @@ def extract_score(text):
 
 def query_llm_robust(candidate_name, resume, job, model, o_key, h_key):
     prompt = f"""
-    Role: Objective Hiring Manager.
-    Task: Rate candidate suitability (0-100) for the position of {job}.
+    Role: Critical Hiring Manager.
+    Task: Evaluate the candidate's suitability for {job} on a scale of 0-100.
     
-    CANDIDATE DETAILS:
-    Name: {candidate_name}
-    Resume Content:
-    {resume}
+    CANDIDATE: {candidate_name}
+    RESUME: {resume}
     
-    CONSTRAINT: You MUST output a single integer score (0-100). Do not provide feedback.
+    INSTRUCTIONS: 
+    1. Be highly critical and distinguishing.
+    2. AVOID generic round numbers (e.g., don't just say 80 or 85). 
+    3. Use precise scoring (e.g., 78, 83, 91, 67).
+    
+    OUTPUT: Provide ONLY the integer score.
     """
     
     messages = [{"role": "user", "content": prompt}]
     
-    try:
-        if "GPT" in model:
-            if not o_key: return None, "Missing OpenAI Key"
-            client = OpenAI(api_key=o_key)
-            resp = client.chat.completions.create(
-                model="gpt-4o", messages=messages, temperature=0.7, max_tokens=10
-            )
-            raw_text = resp.choices[0].message.content
-            return extract_score(raw_text), raw_text
+    # --- OPENAI LOGIC ---
+    if "GPT" in model:
+        if not o_key: return None, "Missing OpenAI Key"
+        client = OpenAI(api_key=o_key)
+        
+        # Retry Loop for OpenAI (Handle 429)
+        for attempt in range(5):
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o", messages=messages, temperature=0.7, max_tokens=10
+                )
+                raw_text = resp.choices[0].message.content
+                return extract_score(raw_text), raw_text
+            except Exception as e:
+                # Check for Rate Limit error string
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    wait_time = (2 ** attempt) + 1  # Exponential Backoff: 2s, 3s, 5s...
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    return None, str(e)
+        return None, "OpenAI Rate Limit Exceeded after 5 retries"
 
-        else:
-            if not h_key: return None, "Missing HF Token"
-            hf_model_id = model.split(" (")[0] 
-            client = InferenceClient(token=h_key)
-            
-            # Retry loop for "Model Loading" errors
-            for attempt in range(3):
-                try:
-                    resp = client.chat_completion(
-                        model=hf_model_id, messages=messages, max_tokens=10, temperature=0.7
-                    )
-                    raw_text = resp.choices[0].message.content
-                    return extract_score(raw_text), raw_text
-                except Exception as e:
-                    if "503" in str(e) or "loading" in str(e).lower():
-                        time.sleep(2)
-                        continue
-                    else:
-                        return None, str(e)
-            return None, "Timeout"
-
-    except Exception as e:
-        return None, str(e)
+    # --- HUGGING FACE LOGIC ---
+    else:
+        if not h_key: return None, "Missing HF Token"
+        hf_model_id = model.split(" (")[0] 
+        client = InferenceClient(token=h_key)
+        
+        # Retry Loop for Hugging Face (Handle 429 & 503)
+        for attempt in range(5):
+            try:
+                resp = client.chat_completion(
+                    model=hf_model_id, messages=messages, max_tokens=10, temperature=0.7
+                )
+                raw_text = resp.choices[0].message.content
+                return extract_score(raw_text), raw_text
+            except Exception as e:
+                # Handle Overloaded (503) or Rate Limit (429)
+                error_msg = str(e).lower()
+                if "429" in error_msg or "503" in error_msg or "loading" in error_msg:
+                    wait_time = (2 ** attempt) + 1 # Exponential Backoff
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    return None, str(e)
+        return None, "HF Timeout/Rate Limit after 5 retries"
 
 # --- MAIN APP ---
 col1, col2 = st.columns([1, 2])
@@ -183,8 +200,8 @@ with col1:
                 # Update Progress
                 my_bar.progress((i + 1) / len(df))
                 
-                # Sleep slightly to prevent API rate limiting
-                time.sleep(0.3) 
+                # Small base sleep to be polite to the API
+                time.sleep(0.1) 
             
             st.session_state['data'] = pd.DataFrame(results)
             st.session_state['logs'] = logs
